@@ -3,6 +3,7 @@ package hudson.plugins.swarm;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 
+import javax.management.*;
 import javax.xml.parsers.ParserConfigurationException;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -26,6 +27,7 @@ public class Client {
 
     private final Options options;
     private final Thread labelFileWatcherThread = null;
+    private final ClientMetrics metrics;
 
     public static void main(String... args) throws InterruptedException, IOException {
         String s = Arrays.toString(args);
@@ -104,12 +106,33 @@ public class Client {
             }
         }
 
+        // create ClientMetrics mBean and register it
+        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+        ObjectName mBeanName = null;
+        try {
+            mBeanName = new ObjectName("hudson.plugins.swarm:name=ClientState");
+            try {
+                mbs.registerMBean(client.metrics, mBeanName);
+            } catch (InstanceAlreadyExistsException|MBeanRegistrationException|NotCompliantMBeanException e) {
+                e.printStackTrace();
+                logger.severe("Failed to register mBean");
+                System.exit(-1);
+            }
+        } catch (MalformedObjectNameException e) {
+            e.printStackTrace();
+            logger.severe("Failed to create ObjectName");
+            System.exit(-1);
+        }
+
+        client.metrics.setState("NOT_CONNECTED");
+
         SwarmClient swarmClient = new SwarmClient(options);
         client.run(swarmClient, args); // pass the command line arguments along so that the LabelFileWatcher thread can have them
     }
 
     public Client(Options options) {
         this.options = options;
+        this.metrics = new ClientMetrics();
         logger.finest("Client created with " + options);
     }
 
@@ -153,6 +176,7 @@ public class Client {
 
                 // create a new swarm slave
                 swarmClient.createSwarmSlave(target);
+                this.metrics.setState("CONNECTING");
                 swarmClient.connect(target);
                 if (options.noRetryAfterConnected) {
                     logger.warning("Connection closed, exiting...");
@@ -169,6 +193,10 @@ public class Client {
                 if (e.getCause() != null) {
                     e.getCause().printStackTrace();
                 }
+            } finally {
+                logger.info("Changing metrics state to NOT_CONNECTED");
+                this.metrics.setState("DISCONNECTED");
+                this.metrics.setLastDisconnectionTime(System.currentTimeMillis());
             }
 
             int waitTime = options.retryBackOffStrategy.waitForRetry(retry++, options.retryInterval, options.maxRetryInterval);
